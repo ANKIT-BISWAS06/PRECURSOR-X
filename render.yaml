@@ -1,0 +1,81 @@
+# Render Blueprint for PRECURSOR-X
+#
+#   Browser -> same-origin Node/Express web service -> FastAPI web service -> PostgreSQL
+#
+# The browser only ever talks to the frontend service's own origin. The Express server in
+# server/ serves the compiled Vite app and forwards /api/* to the FastAPI backend, so the
+# HttpOnly session cookie issued by FastAPI is a first-party cookie.
+# Reference: https://render.com/docs/blueprint-spec
+#
+# FIRST-DEPLOY CHECKLIST (values Render cannot know in advance; set them in the dashboard):
+#   Backend service  (precursor-x-backend)
+#     GROQ_API_KEY  -> your Groq key (sync: false, never committed).
+#     CORS_ORIGINS  -> the ACTUAL public URL of the FRONTEND service, e.g.
+#                      https://precursor-x-frontend.onrender.com   (https, no trailing slash, no "*").
+#                      Browsers send this as the Origin of login/POST requests and the backend
+#                      checks it. The backend refuses to start in production without an https origin.
+#   Frontend service (precursor-x-frontend)
+#     BACKEND_URL   -> the public URL of the BACKEND service, e.g.
+#                      https://precursor-x-backend.onrender.com   (origin only: no /api/v1, no trailing path).
+#                      The frontend server exits at startup in production if this is missing or malformed.
+#
+# CONVERTING AN EXISTING FRONTEND SERVICE: editing this file does NOT change the type of a service
+# that already exists. If precursor-x-frontend currently exists as a Static Site, Render will not
+# turn it into a web service for you. See "Render configuration and migration" in README.md.
+version: "1"
+
+databases:
+  - name: precursor-x-db
+    databaseName: precursor_x
+    user: precursor_user
+    plan: free
+    region: oregon
+    postgresMajorVersion: "16"
+
+services:
+  # 1. FastAPI REST API (unchanged apart from the cookie policy: SameSite is now Lax by default)
+  - type: web
+    name: precursor-x-backend
+    runtime: python
+    region: oregon
+    plan: free
+    rootDir: backend
+    buildCommand: "pip install -r requirements.txt"
+    startCommand: "alembic upgrade head && python -m app.db.seed && uvicorn app.main:app --host 0.0.0.0 --port $PORT"
+    healthCheckPath: /api/v1/health
+    envVars:
+      - key: DATABASE_URL
+        fromDatabase:
+          name: precursor-x-db
+          property: connectionString
+      - key: GROQ_API_KEY
+        sync: false
+      - key: GROQ_MODEL
+        value: openai/gpt-oss-120b
+      - key: APP_ENV
+        value: production
+      - key: DEBUG
+        value: "false"
+      - key: CORS_ORIGINS
+        sync: false
+      - key: AUTH_SECRET_KEY
+        generateValue: true
+
+  # 2. Node/Express web service: serves dist/ and proxies /api/* to the backend
+  - type: web
+    name: precursor-x-frontend
+    runtime: node
+    region: oregon
+    plan: free
+    # --include=dev because the Vite build needs build-time packages (tailwindcss, typescript).
+    buildCommand: "npm ci --include=dev && npm run build"
+    startCommand: "npm start"
+    healthCheckPath: /healthz
+    envVars:
+      - key: NODE_VERSION
+        value: "22.22.0"
+      - key: NODE_ENV
+        value: production
+      - key: BACKEND_URL
+        sync: false
+      # VITE_API_BASE_URL must NOT be set: the built app calls its own origin's relative /api/v1.
